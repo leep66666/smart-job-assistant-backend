@@ -19,4 +19,4 @@ smart-job-assistant/
 │     ├─ llm.py             # 本地 LLM（Ollama）封装
 │     └─ api.py             # 远程大模型 API 调用
 ├─ run.py                   # 项目启动文件
-└─ readme
+└─ README.md                # 项目说明文件
