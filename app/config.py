@@ -12,6 +12,9 @@ class Config:
     RESUME_DIR  = os.path.join(UPLOAD_ROOT, "resumes")
     JD_DIR      = os.path.join(UPLOAD_ROOT, "job_descriptions")
     OUTPUT_DIR  = os.path.join(UPLOAD_ROOT, "outputs")
+    INTERVIEW_ROOT = os.path.join(UPLOAD_ROOT, "interview")
+    INTERVIEW_AUDIO_DIR = os.path.join(INTERVIEW_ROOT, "audio")
+    INTERVIEW_REPORT_DIR = os.path.join(INTERVIEW_ROOT, "reports")
 
     # ===== 日志与请求大小限制 =====
     LOG_LEVEL  = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -32,3 +35,7 @@ class Config:
 
     # ===== 允许的扩展名（与原 app.py 完全一致）=====
     ALLOWED_EXTS = {".pdf", ".docx", ".txt"}
+
+    # ===== 讯飞实时转写配置 =====
+    XFYUN_APPID = os.environ.get("XFYUN_APPID", "9acde7a4")
+    XFYUN_API_KEY = os.environ.get("XFYUN_API_KEY", "")

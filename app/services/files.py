@@ -15,6 +15,8 @@ def ensure_dirs():
     os.makedirs(Config.RESUME_DIR, exist_ok=True)
     os.makedirs(Config.JD_DIR, exist_ok=True)
     os.makedirs(Config.OUTPUT_DIR, exist_ok=True)
+    os.makedirs(Config.INTERVIEW_AUDIO_DIR, exist_ok=True)
+    os.makedirs(Config.INTERVIEW_REPORT_DIR, exist_ok=True)
 
 def ext_ok(filename: str) -> bool:
     _, ext = os.path.splitext((filename or "").lower())
