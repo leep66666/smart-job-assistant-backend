@@ -37,5 +37,6 @@ class Config:
     ALLOWED_EXTS = {".pdf", ".docx", ".txt"}
 
     # ===== 讯飞实时转写配置 =====
-    XFYUN_APPID = os.environ.get("XFYUN_APPID", "9acde7a4")
+    # 必须通过环境变量设置，不允许硬编码
+    XFYUN_APPID = os.environ.get("XFYUN_APPID", "")
     XFYUN_API_KEY = os.environ.get("XFYUN_API_KEY", "")

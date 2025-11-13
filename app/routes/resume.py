@@ -23,8 +23,8 @@ bp = Blueprint("resume", __name__)
 logger = logging.getLogger(__name__)
 
 # 初始化qwen
-# 优先从环境变量读取 API key，如果没有则使用默认值（建议通过环境变量设置）
-QWEN_API_KEY = os.getenv("QWEN_API_KEY", "sk-2633adfd6c8a43819bcedd895eb79c0f")
+# 从环境变量读取 API key（必须设置，不允许硬编码）
+QWEN_API_KEY = os.getenv("QWEN_API_KEY", "")
 QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
 if not QWEN_API_KEY:
