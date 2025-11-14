@@ -8,6 +8,8 @@ import tempfile
 import subprocess
 from pathlib import Path
 from typing import Iterable, Tuple
+from app.extensions import db
+from app.models import ResumeUser, ResumeGeneration
 
 from flask import Blueprint, request, jsonify, url_for
 from openai import OpenAI
@@ -484,17 +486,27 @@ def compile_latex_to_pdf(tex_content: str, file_id: str, timeout_sec: int = 300)
 def gen_file_id(prefix: str = "resume") -> str:
     return f"{prefix}-{uuid.uuid4().hex[:12]}"
 
-
-# 主要 API：生成简历（Qwen Markdown -> LaTeX -> PDF）
+# 主要 API：生成简历（Qwen Markdown -> LaTeX -> PDF，原始文件只走临时目录）
+# 主要 API：生成简历（Qwen Markdown -> LaTeX -> PDF，DB-first + 不持久化原始文件）
+# 主要 API：生成简历（Qwen Markdown -> LaTeX -> PDF，DB-first + 不持久化原始文件）
 @bp.post("/api/resume/generate")
 def api_resume_generate():
     """
-    输入：上传的 resume / jobDescription 文件
-    流程：Qwen 生成 Markdown -> 本地转安全 LaTeX -> (尝试) 编译 PDF
-    返回：始终包含 generatedResume；PDF 成功则给 downloadPdf，失败则仅返回 MD 并附警告
+    输入：上传的 resume / jobDescription 文件 + 可选的 manualResume JSON
+    流程：
+      1. 上传文件只写临时目录，用于解析文本，请求结束即删除，不落长期磁盘
+      2. 解析并截断 resume_text / jd_text
+      3. 检测语言、构造 prompt
+      4. 写入数据库：resume_users / resume_generations
+         - snapshot_profile 用来保存前端手动填写的 ManualResumeFormData JSON
+      5. 调用 Qwen 生成 Markdown 简历
+      6. Markdown -> LaTeX -> PDF，长期只保存 md/pdf
+      7. 用生成结果回填 generation 记录
+      8. 返回结构与老版本保持一致（尤其是 generatedResume / downloadPdf / resumeSaved / jdSaved / warnings）
     """
     ensure_dirs()
 
+    # 0) 拿文件
     resume = request.files.get("resume")
     jd = request.files.get("jobDescription")
     if not resume or not jd:
@@ -502,64 +514,128 @@ def api_resume_generate():
     if not ext_ok(resume.filename) or not ext_ok(jd.filename):
         return jsonify({"success": False, "message": "Unsupported file type"}), 400
 
-    # 保存原始文件
-    resume_path = save_file(resume, Config.RESUME_DIR)
-    jd_path = save_file(jd, Config.JD_DIR)
+    # 用前端传的 userIdentifier 当 email
+    user_email = request.form.get("userIdentifier")
 
-    # 读取文本
-    resume_text, w1 = read_text_from_file(resume_path)
-    jd_text, w2 = read_text_from_file(jd_path)
-    warnings = [w for w in (w1, w2) if w]
+    # 可选：前端传来的手动简历 JSON，字段名 manualResume
+    # 前端对应：formData.append('manualResume', JSON.stringify(manualResume));
+    manual_resume_raw = request.form.get("manualResume")
+    manual_resume = None
 
-    # 截断（可配置）
-    resume_text, w3 = truncate_text(resume_text, Config.MAX_INPUT_CHARS)
-    jd_text, w4 = truncate_text(jd_text, Config.MAX_INPUT_CHARS)
-    warnings.extend([w for w in (w3, w4) if w])
+    # 兼容老的 warning 结构
+    warnings = []
 
-    # 检测语言（根据简历和JD的主要语言）
-    resume_lang = detect_language(resume_text)
-    jd_lang = detect_language(jd_text)
-    # 如果两者语言不一致，优先使用JD的语言
-    target_lang = jd_lang if jd_lang == resume_lang else (jd_lang if jd_lang == 'zh' else resume_lang)
-    logger.info(f"检测到简历语言: {resume_lang}, JD语言: {jd_lang}, 使用目标语言: {target_lang}")
+    if manual_resume_raw:
+        try:
+            manual_resume = json.loads(manual_resume_raw)
+        except json.JSONDecodeError:
+            logger.warning("manualResume 字段 JSON 解析失败，将忽略该字段")
+            warnings.append("manualResume JSON parse error, ignored.")
 
-    # 组装 Prompt（根据语言）
-    base_prompt = build_resume_prompt(resume_text, jd_text, language=target_lang)
-
-    # 统一 fileId，后续 .md/.tex/.pdf 用同一个前缀
-    file_id = gen_file_id()
-
-    # 系统提示词：简洁的格式要求
-    if target_lang == 'zh':
-        system_prompt = (
-            "你是一位资深的简历优化专家和AI招聘助手。\n"
-            "请严格按照用户提供的详细要求生成简历。\n"
-            "关键要求：\n"
-            "1. 输出纯Markdown格式，不要包含代码块标记（不要用 ``` 包裹）\n"
-            "2. 第一行必须是候选人真实姓名，格式为：# 姓名\n"
-            "3. 第二行是联系方式，用 | 分隔\n"
-            "4. 使用 ## 作为章节标题\n"
-            "5. 所有客观信息必须严格遵照个人信息库，不能篡改或夸大\n"
-            "6. 使用STAR法则和量化指标描述经历\n"
-            "7. 所有内容必须使用中文"
-        )
-    else:
-        system_prompt = (
-            "You are a senior resume optimization expert and AI recruitment assistant.\n"
-            "Please strictly follow the detailed requirements provided by the user to generate the resume.\n"
-            "Key Requirements:\n"
-            "1. Output pure Markdown format, do NOT include code block markers (do NOT wrap in ```)\n"
-            "2. The first line must be the candidate's real name, formatted as: # Name\n"
-            "3. The second line is contact information, separated by |\n"
-            "4. Use ## for section headings\n"
-            "5. All objective information must strictly follow the personal information database, no modification or exaggeration allowed\n"
-            "6. Use STAR method and quantitative metrics to describe experiences\n"
-            "7. All content must be in English"
-        )
+    # 为了兼容你之前的返回结构，这里先定义占位变量
+    # 我们现在不再长期保存原始上传文件，所以这俩会一直是 None
+    resume_path = None
+    jd_path = None
 
     try:
-        # 1) 调用 Qwen 生成 Markdown
-        logger.info(f"开始调用 Qwen API 生成简历，file_id: {file_id}")
+        # === 1) 原始文件只写临时目录，用完即删 ===
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+
+            resume_tmp = tmpdir_path / (resume.filename or "resume")
+            jd_tmp = tmpdir_path / (jd.filename or "jobDescription")
+
+            resume.save(str(resume_tmp))
+            jd.save(str(jd_tmp))
+
+            resume_text, w1 = read_text_from_file(str(resume_tmp))
+            jd_text, w2 = read_text_from_file(str(jd_tmp))
+            warnings.extend([w for w in (w1, w2) if w])
+
+        # === 2) 截断 ===
+        resume_text, w3 = truncate_text(resume_text, Config.MAX_INPUT_CHARS)
+        jd_text, w4 = truncate_text(jd_text, Config.MAX_INPUT_CHARS)
+        warnings.extend([w for w in (w3, w4) if w])
+
+        # === 3) 语言检测 ===
+        resume_lang = detect_language(resume_text)
+        jd_lang = detect_language(jd_text)
+        target_lang = jd_lang if jd_lang == resume_lang else (jd_lang if jd_lang == "zh" else resume_lang)
+        logger.info(f"检测到简历语言: {resume_lang}, JD语言: {jd_lang}, 使用目标语言: {target_lang}")
+
+        # === 4) 组装 Prompt ===
+        base_prompt = build_resume_prompt(resume_text, jd_text, language=target_lang)
+
+        # 统一 fileId
+        file_id = gen_file_id()
+
+        # === 5) 系统提示词 ===
+        if target_lang == 'zh':
+            system_prompt = (
+                "你是一位资深的简历优化专家和AI招聘助手。\n"
+                "请严格按照用户提供的详细要求生成简历。\n"
+                "关键要求：\n"
+                "1. 输出纯Markdown格式，不要包含代码块标记（不要用 ``` 包裹）\n"
+                "2. 第一行必须是候选人真实姓名，格式为：# 姓名\n"
+                "3. 第二行是联系方式，用 | 分隔\n"
+                "4. 使用 ## 作为章节标题\n"
+                "5. 所有客观信息必须严格遵照个人信息库，不能篡改或夸大\n"
+                "6. 使用STAR法则和量化指标描述经历\n"
+                "7. 所有内容必须使用中文"
+            )
+        else:
+            system_prompt = (
+                "You are a senior resume optimization expert and AI recruitment assistant.\n"
+                "Please strictly follow the detailed requirements provided by the user to generate the resume.\n"
+                "Key Requirements:\n"
+                "1. Output pure Markdown format, do NOT include code block markers (do NOT wrap in ```)\n"
+                "2. The first line must be the candidate's real name, formatted as: # Name\n"
+                "3. The second line is contact information, separated by |\n"
+                "4. Use ## for section headings\n"
+                "5. All objective information must strictly follow the personal information database, no modification or exaggeration allowed\n"
+                "6. Use STAR method and quantitative metrics to describe experiences\n"
+                "7. All content must be in English"
+            )
+
+        # === 6) 写入数据库：ResumeUser + 初始 ResumeGeneration（还没生成简历） ===
+        user = None
+        if user_email:
+            user = ResumeUser.query.filter_by(email=user_email).first()
+
+        # 如果没找到用户，尽量用手动简历里的姓名 / 邮箱
+        manual_personal = (manual_resume or {}).get("personal", {}) if manual_resume else {}
+
+        if not user:
+            user = ResumeUser(
+                full_name=(manual_personal.get("fullName") or "Unknown"),
+                email=(user_email or manual_personal.get("email")),
+                resume_raw=resume_text,
+            )
+            db.session.add(user)
+            db.session.flush()  # 拿到 user.id
+
+        # snapshot_profile 用来保存前端传来的 ManualResumeFormData（如果有）
+        snapshot_profile_json = json.dumps(manual_resume, ensure_ascii=False) if manual_resume else None
+
+        generation = ResumeGeneration(
+            user_id=user.id,
+            file_id=file_id,
+            resume_text=resume_text,
+            jd_text=jd_text,
+            generated_md="",
+            target_lang=target_lang,
+            md_filename=None,
+            pdf_filename=None,
+            resume_file_path=None,
+            jd_file_path=None,
+            prompt_used=base_prompt,
+            snapshot_profile=snapshot_profile_json,
+        )
+        db.session.add(generation)
+        db.session.flush()  # 拿到 generation.id
+
+        # === 7) 调 Qwen 生成 Markdown（生成部分严格照你原来的逻辑） ===
+        logger.info(f"开始调用 Qwen API 生成简历，file_id: {file_id}, generation_id: {generation.id}")
         completion = client.chat.completions.create(
             model="qwen-plus",
             messages=[
@@ -570,15 +646,16 @@ def api_resume_generate():
         )
 
         raw_md = completion.choices[0].message.content or ""
-        generated_md = strip_code_fences(raw_md)  # ← 这个就是前端要的 generatedResume
-        
+        generated_md = strip_code_fences(raw_md)
+
         if not generated_md:
             logger.warning("Qwen API 返回的内容为空")
+            db.session.rollback()
             return jsonify({"success": False, "message": "生成的简历内容为空，请重试"}), 500
-        
+
         logger.info(f"Qwen API 返回内容长度: {len(generated_md)} 字符")
 
-        # 2) 先把 Markdown 存成 .md，生成下载链接
+        # === 8) 存 Markdown -> 生成 downloadMd ===
         upload_dir = Path(getattr(Config, "UPLOAD_DIR", getattr(Config, "OUTPUT_DIR", "uploads")))
         upload_dir.mkdir(parents=True, exist_ok=True)
         md_path = upload_dir / f"{file_id}.md"
@@ -586,13 +663,11 @@ def api_resume_generate():
         download_md = url_for("uploads.download_file", file_name=f"{file_id}.md", _external=True)
         logger.info(f"Markdown 文件已保存: {md_path}")
 
-        # 3) 尝试生成 PDF（失败不影响主流程）
+        # === 9) 尝试生成 PDF ===
         download_pdf = None
         try:
             logger.info("开始生成 PDF...")
-            # Markdown -> LaTeX
             latex_body = markdown_to_latex(generated_md)
-            # 根据检测到的语言选择模板
             latex_text = wrap_into_template(latex_body, chinese=(target_lang == 'zh'))
 
             tex_path, pdf_path, _ = compile_latex_to_pdf(latex_text, file_id)
@@ -602,7 +677,13 @@ def api_resume_generate():
             logger.warning(f"PDF 生成失败（不影响主流程）: {latex_err}")
             warnings.append(f"PDF generation skipped: {latex_err}")
 
-        # 4) 返回：务必包含 generatedResume，前端才能切换到结果页
+        # === 10) 回填 DB ===
+        generation.generated_md = generated_md
+        generation.md_filename = f"{file_id}.md"
+        generation.pdf_filename = f"{file_id}.pdf" if download_pdf else None
+        db.session.commit()
+
+        # === 11) 返回：务必包含 generatedResume，前端才能切换到结果页 ===
         logger.info(f"简历生成完成，file_id: {file_id}, 返回成功响应")
         return jsonify({
             "success": True,
@@ -610,11 +691,15 @@ def api_resume_generate():
             "fileId": file_id,
             "downloadMd": download_md,
             "downloadPdf": download_pdf,   # 可能为 None
-            "resumeSaved": resume_path,
-            "jdSaved": jd_path,
+            "resumeSaved": resume_path,    # 现在就是 None，占位用
+            "jdSaved": jd_path,            # 同上
             "warnings": warnings,
         }), 200
 
     except Exception as e:
-        logger.exception("调用 Qwen API / LaTeX 编译失败")
+        logger.exception("调用 Qwen API / LaTeX 编译或数据库写入失败")
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
         return jsonify({"success": False, "message": f"生成失败: {e}"}), 500

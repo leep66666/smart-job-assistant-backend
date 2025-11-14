@@ -22,6 +22,13 @@ class Config:
     # Flask 识别的内容长度限制（单位：字节）
     MAX_CONTENT_LENGTH = MAX_MB * 1024 * 1024
 
+    # ===== 数据库配置（新增） =====
+    SQLALCHEMY_DATABASE_URI = os.environ.get(
+        "DATABASE_URL",
+        "mysql+pymysql://root:Hku123456@localhost:3306/smart_job_assistant?charset=utf8mb4"
+    )
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+
     # ===== CORS 白名单（与原 app.py 保持一致）=====
     CORS_ORIGINS = [
         "http://localhost:5173",
