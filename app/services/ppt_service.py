@@ -30,7 +30,7 @@ qwen_client = OpenAI(
 )
 
 # PPT模板文件路径
-_project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+_project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 PPT_TEMPLATE_PATH_PPTX = os.path.join(_project_root, "个人竞聘_求职汇报模板.pptx")
 PPT_TEMPLATE_PATH_POTX = os.path.join(_project_root, "个人竞聘_求职汇报模板.potx")
 
