@@ -6,8 +6,9 @@ import shutil
 import logging
 import tempfile
 import subprocess
+import json
 from pathlib import Path
-from typing import Iterable, Tuple
+from typing import Any, Dict, Iterable, Tuple
 from app.extensions import db
 from app.models import ResumeUser, ResumeGeneration
 
@@ -39,9 +40,9 @@ client = OpenAI(
     base_url=QWEN_BASE_URL,
 )
 
-
 # Markdown -> LaTeX
 TRIPLE_BACKTICK_RE = re.compile(r"^\s*```(?:[a-zA-Z]+)?\s*([\s\S]*?)\s*```\s*$")
+
 
 def detect_language(text: str) -> str:
     """
@@ -50,18 +51,19 @@ def detect_language(text: str) -> str:
     """
     if not text:
         return 'en'  # 默认英文
-    
+
     # 统计中文字符数量
     chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', text))
     total_chars = len(re.findall(r'[a-zA-Z\u4e00-\u9fff]', text))
-    
+
     if total_chars == 0:
         return 'en'
-    
+
     # 如果中文字符占比超过30%，认为是中文
     if chinese_chars / total_chars > 0.3:
         return 'zh'
     return 'en'
+
 
 LATEX_SPECIAL = {
     '\\': r'\textbackslash{}',
@@ -76,12 +78,58 @@ LATEX_SPECIAL = {
     '~': r'\~{}',
 }
 
+
 def strip_code_fences(text: str) -> str:
     """去掉最外层 ``` 包裹（若存在），返回内部内容。"""
     m = TRIPLE_BACKTICK_RE.match(text.strip())
     if m:
         return m.group(1).strip()
     return text.strip()
+
+
+def manual_resume_to_text(payload: Dict[str, Any]) -> str:
+    if not isinstance(payload, dict):
+        return ""
+
+    lines = []
+
+    personal = payload.get("personal") or {}
+    personal_parts = [
+        personal.get("fullName"),
+        personal.get("email"),
+        personal.get("phoneCode"),
+        personal.get("phoneNumber"),
+    ]
+    personal_text = " ".join(filter(None, personal_parts)).strip()
+    if personal_text:
+        lines.append(f"Personal Information: {personal_text}")
+
+    def join_section(title: str, entries):
+        section_lines = []
+        for item in entries or []:
+            if not isinstance(item, dict):
+                continue
+            values = [str(v).strip() for v in item.values() if isinstance(v, str) and v.strip()]
+            if values:
+                section_lines.append(f"- {'; '.join(values)}")
+        if section_lines:
+            lines.append(f"{title}:\n" + "\n".join(section_lines))
+
+    join_section("Education", payload.get("education"))
+    join_section("Internships", payload.get("internships"))
+    join_section("Work Experience", payload.get("work"))
+    join_section("Projects", payload.get("projects"))
+
+    skills = payload.get("skills") or {}
+    skills_values = [skills.get("programming"), skills.get("office"), skills.get("languages")]
+    skills_text = "; ".join(filter(None, skills_values))
+    if skills_text:
+        lines.append(f"Skills: {skills_text}")
+
+    join_section("Competitions", payload.get("competitions"))
+
+    return "\n".join(line for line in lines if line).strip()
+
 
 def escape_latex(text: str) -> str:
     """转义普通段落中的 LaTeX 特殊字符"""
@@ -91,6 +139,7 @@ def escape_latex(text: str) -> str:
             continue
         text = text.replace(ch, rep)
     return text
+
 
 def markdown_to_latex(md: str) -> str:
     """
@@ -132,13 +181,13 @@ def markdown_to_latex(md: str) -> str:
         # 使用不包含LaTeX特殊字符的占位符格式，避免被转义
         placeholders = {}
         placeholder_counter = [0]
-        
+
         def get_placeholder():
             placeholder_counter[0] += 1
             # 使用不包含下划线和其他LaTeX特殊字符的占位符
             # 使用大写的PLACEHOLDER前缀和数字，避免与LaTeX特殊字符冲突
             return f"PLACEHOLDER{placeholder_counter[0]}PLACEHOLDER"
-        
+
         # 先处理代码（避免与其他格式冲突）
         def repl_inline_code(m):
             placeholder = get_placeholder()
@@ -146,35 +195,43 @@ def markdown_to_latex(md: str) -> str:
             inner = inner.replace('\\', r'\textbackslash{}').replace('{', r'\{').replace('}', r'\}')
             placeholders[placeholder] = r'\texttt{' + inner + '}'
             return placeholder
+
         text = re.sub(r'`([^`]+)`', repl_inline_code, text)
-        
+
         # 处理链接 [text](url)
         def repl_link(m):
             placeholder = get_placeholder()
             link_text = m.group(1)
             link_url = m.group(2)
             # URL 中的特殊字符需要转义
-            link_url_escaped = link_url.replace('\\', r'\textbackslash{}').replace('{', r'\{').replace('}', r'\}').replace('#', r'\#').replace('$', r'\$').replace('%', r'\%').replace('&', r'\&').replace('_', r'\_').replace('^', r'\^{}').replace('~', r'\~{}')
+            link_url_escaped = link_url.replace('\\', r'\textbackslash{}').replace('{', r'\{').replace('}',
+                                                                                                       r'\}').replace(
+                '#', r'\#').replace('$', r'\$').replace('%', r'\%').replace('&', r'\&').replace('_', r'\_').replace('^',
+                                                                                                                    r'\^{}').replace(
+                '~', r'\~{}')
             placeholders[placeholder] = r'\href{' + link_url_escaped + '}{' + escape_latex(link_text) + '}'
             return placeholder
+
         text = re.sub(r'\[([^\]]+)\]\(([^\)]+)\)', repl_link, text)
-        
+
         # 处理粗体 **text** 或 __text__
         def repl_bold(m):
             placeholder = get_placeholder()
             placeholders[placeholder] = r'\textbf{' + escape_latex(m.group(1)) + '}'
             return placeholder
+
         text = re.sub(r'\*\*([^\*]+)\*\*', repl_bold, text)
         text = re.sub(r'__([^_]+)__', repl_bold, text)
-        
+
         # 处理斜体 *text* 或 _text_（不在粗体或代码中）
         def repl_italic(m):
             placeholder = get_placeholder()
             placeholders[placeholder] = r'\textit{' + escape_latex(m.group(1)) + '}'
             return placeholder
+
         text = re.sub(r'(?<!\*)\*([^\*]+)\*(?!\*)', repl_italic, text)
         text = re.sub(r'(?<!_)_([^_]+)_(?!_)', repl_italic, text)
-        
+
         # 修复符号前后的空白：在符号前后添加LaTeX的不可断空格
         # 使用 ~ 来防止换行，但只在非列表项的情况下处理
         # 注意：这里假设列表项已经在之前被处理了，所以这里的文本是普通段落
@@ -184,14 +241,14 @@ def markdown_to_latex(md: str) -> str:
         text = re.sub(r'([^\s~])\s+=\s+([^\s~])', r'\1~=~\2', text)  # = 前后
         text = re.sub(r'([^\s~])\s+<\s+([^\s~])', r'\1~<~\2', text)  # < 前后
         text = re.sub(r'([^\s~])\s+>\s+([^\s~])', r'\1~>~\2', text)  # > 前后
-        
+
         # 转义整个文本（占位符不包含LaTeX特殊字符，不会被转义）
         text = escape_latex(text)
-        
+
         # 替换回格式标记
         for placeholder, replacement in placeholders.items():
             text = text.replace(placeholder, replacement)
-        
+
         return text
 
     i = 0
@@ -291,7 +348,8 @@ def markdown_to_latex(md: str) -> str:
             job_time = job_match.group(2).strip()
             # 使用tabularx格式：职位名称左对齐，时间右对齐
             out.append(r'\begin{tabularx}{\linewidth}{@{}l X r@{}}')
-            out.append(r'\textbf{' + escape_latex(job_title) + r'} & \hfill & ' + escape_latex(job_time) + r' \\[3.75pt]')
+            out.append(
+                r'\textbf{' + escape_latex(job_title) + r'} & \hfill & ' + escape_latex(job_time) + r' \\[3.75pt]')
             out.append(r'\end{tabularx}')
             i += 1
             continue
@@ -308,6 +366,7 @@ def markdown_to_latex(md: str) -> str:
     if in_minipage:
         out.append(r'\end{minipage}')
     return '\n'.join(out)
+
 
 def wrap_into_template(body: str, chinese: bool = True) -> str:
     """
@@ -329,7 +388,7 @@ def wrap_into_template(body: str, chinese: bool = True) -> str:
 \usepackage{multicol}
 \usepackage{multirow}
 """
-    
+
     # 中文字体支持
     if chinese:
         preamble += r"""
@@ -343,7 +402,7 @@ def wrap_into_template(body: str, chinese: bool = True) -> str:
 \usepackage[T1]{fontenc}
 \usepackage{lmodern}
 """
-    
+
     # 继续添加必要的包
     preamble += r"""
 % 自定义章节格式
@@ -359,7 +418,7 @@ def wrap_into_template(body: str, chinese: bool = True) -> str:
 \titleformat{\section}{\Large\scshape\raggedright}{}{0em}{}[\titlerule]
 \titlespacing{\section}{0pt}{10pt}{10pt}
 """
-    
+
     # 继续添加必要的包
     preamble += r"""
 % 超链接设置
@@ -415,7 +474,7 @@ def wrap_into_template(body: str, chinese: bool = True) -> str:
 
 \begin{document}
 """
-    
+
     # 内容包装
     # 对于中文，由于已经设置了默认字体，不需要额外的字体包装
     # 但如果需要确保所有内容都使用中文字体，可以保留cnfont包装
@@ -424,10 +483,12 @@ def wrap_into_template(body: str, chinese: bool = True) -> str:
         content = r"{\cnfont" + "\n" + body + "\n}"
     else:
         content = body
-    
+
     return preamble + content + r"""
 \end{document}
 """
+
+
 # LaTeX 编译
 
 def compile_latex_to_pdf(tex_content: str, file_id: str, timeout_sec: int = 300) -> Tuple[str, str, str]:
@@ -466,9 +527,11 @@ def compile_latex_to_pdf(tex_content: str, file_id: str, timeout_sec: int = 300)
             cmd = [pdflatex_bin, "-interaction=nonstopmode", tex_path.name]
             try:
                 logger.info(f"Running pdflatex: {' '.join(cmd)} (1/2)")
-                p1 = subprocess.run(cmd, cwd=tmpdir_path, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout_sec)
+                p1 = subprocess.run(cmd, cwd=tmpdir_path, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                    timeout=timeout_sec)
                 logger.info(f"Running pdflatex: {' '.join(cmd)} (2/2)")
-                p2 = subprocess.run(cmd, cwd=tmpdir_path, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout_sec)
+                p2 = subprocess.run(cmd, cwd=tmpdir_path, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                    timeout=timeout_sec)
             except subprocess.TimeoutExpired:
                 raise RuntimeError(f"LaTeX 编译超过 {timeout_sec}s 超时。")
             if p2.returncode != 0 or not pdf_path_tmp.exists():
@@ -483,8 +546,10 @@ def compile_latex_to_pdf(tex_content: str, file_id: str, timeout_sec: int = 300)
 
     return str(final_tex), str(final_pdf), file_id
 
+
 def gen_file_id(prefix: str = "resume") -> str:
     return f"{prefix}-{uuid.uuid4().hex[:12]}"
+
 
 # 主要 API：生成简历（Qwen Markdown -> LaTeX -> PDF，原始文件只走临时目录）
 # 主要 API：生成简历（Qwen Markdown -> LaTeX -> PDF，DB-first + 不持久化原始文件）
@@ -509,13 +574,6 @@ def api_resume_generate():
     # 0) 拿文件
     resume = request.files.get("resume")
     jd = request.files.get("jobDescription")
-    if not resume or not jd:
-        return jsonify({"success": False, "message": "Both files are required."}), 400
-    if not ext_ok(resume.filename) or not ext_ok(jd.filename):
-        return jsonify({"success": False, "message": "Unsupported file type"}), 400
-
-    # 用前端传的 userIdentifier 当 email
-    user_email = request.form.get("userIdentifier")
 
     # 可选：前端传来的手动简历 JSON，字段名 manualResume
     # 前端对应：formData.append('manualResume', JSON.stringify(manualResume));
@@ -532,8 +590,25 @@ def api_resume_generate():
             logger.warning("manualResume 字段 JSON 解析失败，将忽略该字段")
             warnings.append("manualResume JSON parse error, ignored.")
 
-    # 为了兼容你之前的返回结构，这里先定义占位变量
-    # 我们现在不再长期保存原始上传文件，所以这俩会一直是 None
+    manual_resume_text = manual_resume_to_text(manual_resume) if manual_resume else ""
+    has_manual_resume_text = bool(manual_resume_text.strip())
+
+    if not jd:
+        return jsonify({"success": False, "message": "Job description file is required."}), 400
+
+    if resume and not ext_ok(resume.filename):
+        return jsonify({"success": False, "message": "Unsupported resume file type"}), 400
+    if not ext_ok(jd.filename):
+        return jsonify({"success": False, "message": "Unsupported job description file type"}), 400
+
+    if not resume and not has_manual_resume_text:
+        return jsonify({"success": False, "message": "Provide either a resume file or manual resume data."}), 400
+
+    # 用前端传的 userIdentifier 当 email
+    user_email = request.form.get("userIdentifier")
+
+    # 为了兼容此前的返回结构，这里先定义占位变量
+    # 当前实现不再长期保存原始上传文件，所以这俩会一直是 None
     resume_path = None
     jd_path = None
 
@@ -542,13 +617,20 @@ def api_resume_generate():
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
 
-            resume_tmp = tmpdir_path / (resume.filename or "resume")
             jd_tmp = tmpdir_path / (jd.filename or "jobDescription")
-
-            resume.save(str(resume_tmp))
             jd.save(str(jd_tmp))
 
-            resume_text, w1 = read_text_from_file(str(resume_tmp))
+            if resume:
+                resume_tmp = tmpdir_path / (resume.filename or "resume")
+                resume.save(str(resume_tmp))
+                resume_text, w1 = read_text_from_file(str(resume_tmp))
+                warnings.extend([w1] if w1 else [])
+            else:
+                resume_text = manual_resume_text
+                if not resume_text:
+                    return jsonify({"success": False, "message": "Manual resume data is empty."}), 400
+                w1 = None
+
             jd_text, w2 = read_text_from_file(str(jd_tmp))
             warnings.extend([w for w in (w1, w2) if w])
 
@@ -690,9 +772,9 @@ def api_resume_generate():
             "generatedResume": generated_md,
             "fileId": file_id,
             "downloadMd": download_md,
-            "downloadPdf": download_pdf,   # 可能为 None
-            "resumeSaved": resume_path,    # 现在就是 None，占位用
-            "jdSaved": jd_path,            # 同上
+            "downloadPdf": download_pdf,  # 可能为 None
+            "resumeSaved": resume_path,  # 现在就是 None，占位用
+            "jdSaved": jd_path,  # 同上
             "warnings": warnings,
         }), 200
 
