@@ -15,12 +15,12 @@ from openai import OpenAI
 logger = logging.getLogger(__name__)
 
 # 初始化Qwen API客户端
-QWEN_API_KEY = os.getenv("QWEN_API_KEY") or "sk-2633adfd6c8a43819bcedd895eb79c0f"
+QWEN_API_KEY = os.getenv("QWEN_API_KEY", "")
 QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen-plus")
 
 if not QWEN_API_KEY:
-    logger.error("QWEN_API_KEY 未设置，PPT生成功能将无法正常工作")
+    logger.error("QWEN_API_KEY 未设置，PPT生成功能将无法正常工作。请设置环境变量 QWEN_API_KEY")
 else:
     logger.info(f"QWEN_API_KEY 已配置（长度: {len(QWEN_API_KEY)}）")
 
