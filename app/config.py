@@ -23,10 +23,13 @@ class Config:
     MAX_CONTENT_LENGTH = MAX_MB * 1024 * 1024
 
     # ===== 数据库配置（新增） =====
-    SQLALCHEMY_DATABASE_URI = os.environ.get(
-        "DATABASE_URL",
-        "mysql+pymysql://root:Hku123456@localhost:3306/smart_job_assistant?charset=utf8mb4"
-    )
+    # 优先使用环境变量，如果没有则使用SQLite（开发环境）
+    DATABASE_URL = os.environ.get("DATABASE_URL")
+    if DATABASE_URL:
+        SQLALCHEMY_DATABASE_URI = DATABASE_URL
+    else:
+        # 使用SQLite作为默认数据库（不需要额外配置）
+        SQLALCHEMY_DATABASE_URI = "sqlite:///smart_job_assistant.db"
     SQLALCHEMY_TRACK_MODIFICATIONS = False
 
     # ===== CORS 白名单（与原 app.py 保持一致）=====
