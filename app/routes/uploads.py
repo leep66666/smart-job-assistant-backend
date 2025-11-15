@@ -1,24 +1,22 @@
 import os
 from flask import Blueprint, jsonify, send_file
 from app.config import Config
-from app.services.api import list_ollama_models, ping_ollama
 
 bp = Blueprint("uploads", __name__)
 
 @bp.get("/health")
 def health():
-    try:
-        ping_ollama()
-        return jsonify({"ok": True, "model": Config.OLLAMA_MODEL})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+    """健康检查端点，不再依赖ollama"""
+    return jsonify({"ok": True, "message": "Service is running"})
 
 @bp.get("/api/models")
 def models():
-    try:
-        return jsonify({"success": True, "models": list_ollama_models()})
-    except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
+    """模型列表端点，已切换到Qwen API"""
+    return jsonify({
+        "success": True, 
+        "models": ["qwen-plus"],
+        "message": "Using Qwen API"
+    })
 
 @bp.get("/api/files/<file_name>")
 def download_file(file_name: str):

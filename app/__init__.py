@@ -7,6 +7,7 @@ from .services.files import ensure_dirs
 from .routes.resume import bp as resume_bp
 from .routes.interview import bp as interview_bp
 from .routes.uploads import bp as uploads_bp
+from .routes.ppt import bp as ppt_bp
 
 # 👇 新增：引入全局 db 实例
 from .extensions import db
@@ -35,6 +36,7 @@ def create_app() -> Flask:
     app.register_blueprint(resume_bp)
     app.register_blueprint(interview_bp)
     app.register_blueprint(uploads_bp)
+    app.register_blueprint(ppt_bp)
 
     # 👇 新增：在应用上下文中创建表（开发环境用这个就够了）
     with app.app_context():

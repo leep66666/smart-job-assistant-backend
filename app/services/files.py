@@ -1,5 +1,6 @@
 import os
 import uuid
+import zipfile
 from datetime import datetime
 from typing import Tuple, Optional, List
 from werkzeug.utils import secure_filename
@@ -22,6 +23,44 @@ def ext_ok(filename: str) -> bool:
     _, ext = os.path.splitext((filename or "").lower())
     return ext in Config.ALLOWED_EXTS
 
+
+def _detect_file_type(path: str) -> Optional[str]:
+    """
+    通过文件头检测文件类型
+    返回文件扩展名（如 '.pdf', '.docx', '.txt'）或 None
+    """
+    try:
+        with open(path, "rb") as f:
+            header = f.read(8)
+        
+        # PDF文件: %PDF
+        if header.startswith(b'%PDF'):
+            return ".pdf"
+        
+        # DOCX/DOCM文件: ZIP格式，PK\x03\x04
+        if header.startswith(b'PK\x03\x04'):
+            # 检查是否是docx（检查内部结构）
+            try:
+                with zipfile.ZipFile(path, 'r') as zip_ref:
+                    namelist = zip_ref.namelist()
+                    if '[Content_Types].xml' in namelist:
+                        return ".docx"
+            except:
+                pass
+            return ".docx"  # 默认认为是docx
+        
+        # 纯文本文件：尝试UTF-8解码
+        try:
+            with open(path, "r", encoding="utf-8", errors="strict") as f:
+                f.read(1024)  # 尝试读取前1KB
+            return ".txt"
+        except UnicodeDecodeError:
+            pass
+        
+        return None
+    except Exception:
+        return None
+
 def save_file(file_storage, target_dir: str) -> str:
     original = secure_filename(file_storage.filename or "")
     _, ext = os.path.splitext(original)
@@ -36,9 +75,18 @@ def read_text_from_file(path: str) -> Tuple[str, Optional[str]]:
     _, ext = os.path.splitext(path.lower())
     warn = None
     try:
+        # 检测文件实际类型（通过文件头）
+        file_type = _detect_file_type(path)
+        if file_type:
+            ext = file_type
+            if file_type != os.path.splitext(path.lower())[1]:
+                warn = f"文件扩展名与实际类型不匹配，已按{file_type}格式读取"
+        
         if ext == ".txt":
+            # 检测到的文件类型已经处理过了，如果是docx会在这里被重新分配
+            # 真正的文本文件
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                return f.read(), None
+                return f.read(), warn
         elif ext == ".pdf":
             try:
                 import PyPDF2
