@@ -8,6 +8,12 @@ __pycache__/
 .env.*.local
 *.secret
 
+# 数据库文件
+*.db
+*.sqlite
+*.sqlite3
+instance/
+
 uploads/**
 !uploads/
 !uploads/**/
