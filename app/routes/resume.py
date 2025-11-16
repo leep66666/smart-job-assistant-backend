@@ -26,14 +26,14 @@ bp = Blueprint("resume", __name__)
 logger = logging.getLogger(__name__)
 
 # 初始化qwen
-# 从环境变量读取 API key（必须设置，不允许硬编码）
-QWEN_API_KEY = os.getenv("QWEN_API_KEY", "")
+# 优先使用 DASHSCOPE_API_KEY（百炼API Key）
+QWEN_API_KEY = os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY", "")
 QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
 if not QWEN_API_KEY:
-    logger.error("QWEN_API_KEY 未设置，简历生成功能将无法正常工作。请设置环境变量 QWEN_API_KEY")
+    logger.error("DASHSCOPE_API_KEY 或 QWEN_API_KEY 未设置，简历生成功能将无法正常工作。请设置环境变量 DASHSCOPE_API_KEY 或 QWEN_API_KEY")
 else:
-    logger.info(f"QWEN_API_KEY 已配置（长度: {len(QWEN_API_KEY)}）")
+    logger.info(f"Qwen API Key 已配置（长度: {len(QWEN_API_KEY)}，来源: {'DASHSCOPE_API_KEY' if os.getenv('DASHSCOPE_API_KEY') else 'QWEN_API_KEY'}）")
 
 client = OpenAI(
     api_key=QWEN_API_KEY,
@@ -719,7 +719,7 @@ def api_resume_generate():
         # === 7) 调 Qwen 生成 Markdown（生成部分严格照你原来的逻辑） ===
         logger.info(f"开始调用 Qwen API 生成简历，file_id: {file_id}, generation_id: {generation.id}")
         completion = client.chat.completions.create(
-            model="qwen-plus",
+            model=os.getenv("QWEN_MODEL", "qwen3-max"),
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": base_prompt},

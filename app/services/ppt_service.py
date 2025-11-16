@@ -14,20 +14,27 @@ from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
-# 初始化Qwen API客户端
-QWEN_API_KEY = os.getenv("QWEN_API_KEY", "")
-QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen-plus")
+# 初始化Qwen API配置
+# 优先使用 DASHSCOPE_API_KEY（百炼API Key）
+QWEN_API_KEY = os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY", "")
+QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen3-max")
+USE_DASHSCOPE_LIB = os.getenv("USE_DASHSCOPE_LIB", "true").lower() in ("true", "1", "yes")
 
 if not QWEN_API_KEY:
-    logger.error("QWEN_API_KEY 未设置，PPT生成功能将无法正常工作。请设置环境变量 QWEN_API_KEY")
+    logger.error("DASHSCOPE_API_KEY 或 QWEN_API_KEY 未设置，PPT生成功能将无法正常工作。请设置环境变量 DASHSCOPE_API_KEY 或 QWEN_API_KEY")
 else:
-    logger.info(f"QWEN_API_KEY 已配置（长度: {len(QWEN_API_KEY)}）")
+    logger.info(f"Qwen API Key 已配置（长度: {len(QWEN_API_KEY)}，来源: {'DASHSCOPE_API_KEY' if os.getenv('DASHSCOPE_API_KEY') else 'QWEN_API_KEY'}）")
+    logger.info(f"使用模型: {QWEN_MODEL}，调用方式: {'dashscope库' if USE_DASHSCOPE_LIB else 'openai兼容模式'}")
 
-qwen_client = OpenAI(
-    api_key=QWEN_API_KEY,
-    base_url=QWEN_BASE_URL,
-)
+# 如果使用 dashscope 库，不需要初始化 OpenAI 客户端
+if not USE_DASHSCOPE_LIB:
+    QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    qwen_client = OpenAI(
+        api_key=QWEN_API_KEY,
+        base_url=QWEN_BASE_URL,
+    )
+else:
+    qwen_client = None  # 使用 dashscope 库，不需要 OpenAI 客户端
 
 # PPT模板文件路径
 _project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
@@ -103,36 +110,93 @@ JSON格式：
 """
 
 
+def _handle_openai_error(error: Exception) -> str:
+    """处理 OpenAI API 错误，返回友好的错误消息"""
+    from openai import BadRequestError, AuthenticationError, RateLimitError, APIError
+    
+    error_str = str(error)
+    
+    # 账户欠费
+    if "Arrearage" in error_str or "overdue-payment" in error_str or "account is in good standing" in error_str:
+        return "API调用失败：账户欠费或账户状态异常。请检查阿里云百炼账户余额和状态。详情：https://help.aliyun.com/zh/model-studio/error-code#overdue-payment"
+    
+    # 认证错误
+    if isinstance(error, AuthenticationError) or "Invalid" in error_str and "API key" in error_str:
+        return "API调用失败：API Key无效或已过期。请检查 DASHSCOPE_API_KEY 环境变量是否正确。"
+    
+    # 限流错误
+    if isinstance(error, RateLimitError) or "rate limit" in error_str.lower():
+        return "API调用失败：请求频率过高，请稍后再试。"
+    
+    # 请求错误
+    if isinstance(error, BadRequestError):
+        error_msg = f"API调用失败：请求参数错误。{error_str}"
+        return error_msg
+    
+    # 其他 API 错误
+    if isinstance(error, APIError):
+        return f"API调用失败：{error_str}"
+    
+    # 未知错误
+    return f"API调用失败：{error_str}"
+
+
 def generate_ppt_outline(resume_text: str, jd_text: str) -> Dict:
     """使用Qwen API生成PPT大纲"""
     prompt = build_ppt_outline_prompt(resume_text, jd_text)
     logger.info(f"开始生成PPT大纲，简历长度: {len(resume_text)} 字符，JD长度: {len(jd_text)} 字符")
     
+    messages = [
+        {
+            "role": "system",
+            "content": "你是一位专业的PPT内容规划专家。你的任务是根据简历和岗位JD，提取并整理信息，生成PPT大纲。所有信息必须严格来自简历，不能篡改或夸大事实。"
+        },
+        {
+            "role": "user",
+            "content": prompt
+        }
+    ]
+    
     try:
-        completion = qwen_client.chat.completions.create(
-            model=QWEN_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "你是一位专业的PPT内容规划专家。你的任务是根据简历和岗位JD，提取并整理信息，生成PPT大纲。所有信息必须严格来自简历，不能篡改或夸大事实。"
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            temperature=0.2,
-        )
-        
-        response = completion.choices[0].message.content.strip()
+        if USE_DASHSCOPE_LIB:
+            # 使用 dashscope 库直接调用
+            from dashscope import Generation
+            import dashscope
+            
+            dashscope.base_http_api_url = 'https://dashscope.aliyuncs.com/api/v1'
+            
+            response_obj = Generation.call(
+                api_key=QWEN_API_KEY,
+                model=QWEN_MODEL,
+                messages=messages,
+                result_format="message",
+                temperature=0.2,
+            )
+            
+            if response_obj.status_code != 200:
+                error_msg = f"HTTP返回码：{response_obj.status_code}，错误码：{response_obj.code}，错误信息：{response_obj.message}"
+                logger.error(f"调用Qwen API失败: {error_msg}")
+                raise ValueError(f"API调用失败：{error_msg}")
+            
+            response = response_obj.output.choices[0].message.content.strip()
+        else:
+            # 使用 openai 兼容模式
+            completion = qwen_client.chat.completions.create(
+                model=QWEN_MODEL,
+                messages=messages,
+                temperature=0.2,
+            )
+            response = completion.choices[0].message.content.strip()
         
         if not response or len(response.strip()) < 10:
             logger.warning("模型返回内容过短")
             raise ValueError("模型返回内容过短")
             
     except Exception as e:
-        logger.error(f"调用Qwen API失败: {e}")
-        raise
+        friendly_error = _handle_openai_error(e)
+        logger.error(f"调用Qwen API失败: {friendly_error}")
+        logger.error(f"原始错误: {e}", exc_info=True)
+        raise ValueError(friendly_error) from e
     
     # 提取JSON
     json_str = response.strip()

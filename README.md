@@ -104,3 +104,112 @@ smart-job-assistant-backend/
 - **Qwen 调用失败**：检查网络、API Key 是否正确，必要时可将 `USE_QWEN_INTEGRATION` 设为 `false` 跳过整合。
 - **讯飞连接异常**：确认 AppID/API Key、白名单及网络通路；同时留意日志中 `xfyun_rtasr_*.log` 文件。
 - **PDF 生成失败**：确保系统已安装 `libfreetype`、`libjpeg` 等 ReportLab 依赖，并正确安装 `reportlab`。
+
+---
+
+## Qwen/DashScope API 配置说明
+
+项目现已支持使用 DashScope API（百炼）调用 Qwen 模型。配置方式如下：
+
+### 方式一：使用环境变量脚本（推荐）
+
+```bash
+# 激活 conda 环境
+conda activate py39
+
+# 运行设置脚本
+source setup_env.sh
+
+# 或者手动设置（请替换为您的实际 API Key）
+export DASHSCOPE_API_KEY="YOUR_DASHSCOPE_API_KEY_HERE"
+```
+
+### 方式二：在 shell 配置文件中永久设置
+
+将以下内容添加到 `~/.bashrc` 或 `~/.zshrc`：
+
+```bash
+export DASHSCOPE_API_KEY="YOUR_DASHSCOPE_API_KEY_HERE"
+export XFYUN_APPID="YOUR_XFYUN_APPID_HERE"
+export XFYUN_API_KEY="YOUR_XFYUN_API_KEY_HERE"
+```
+
+### 环境变量优先级
+
+系统会按以下优先级查找 API Key：
+1. `DASHSCOPE_API_KEY`（优先，百炼API Key）
+2. `INTERVIEW_EVAL_API_KEY`
+3. `QWEN_API_KEY`
+
+### 默认配置
+
+- **模型名称**: `qwen3-max`（可通过 `INTERVIEW_EVAL_MODEL` 环境变量修改）
+- **Base URL**: `https://dashscope.aliyuncs.com/compatible-mode/v1`（可通过 `QWEN_BASE_URL` 或 `INTERVIEW_EVAL_BASE_URL` 环境变量修改）
+
+### 验证配置
+
+启动后端后，查看日志确认模型客户端是否成功创建：
+
+```
+INFO: 创建评估模型客户端: base_url=https://dashscope.aliyuncs.com/compatible-mode/v1
+INFO: 开始生成面试问题，使用模型: qwen3-max
+```
+
+---
+
+---
+
+## Qwen API 调用方式说明
+
+项目支持两种方式调用 Qwen API：
+
+### 方式一：使用 dashscope 库（推荐，默认）
+
+这是阿里云官方的 `dashscope` 库，直接调用 API，更稳定可靠。
+
+**配置方式：**
+```bash
+export DASHSCOPE_API_KEY="YOUR_DASHSCOPE_API_KEY_HERE"
+export USE_DASHSCOPE_LIB="true"  # 默认值，可选
+```
+
+### 方式二：使用 openai 兼容模式
+
+使用 `openai` 库的兼容模式调用 DashScope API。
+
+**配置方式：**
+```bash
+export DASHSCOPE_API_KEY="YOUR_DASHSCOPE_API_KEY_HERE"
+export USE_DASHSCOPE_LIB="false"  # 强制使用 openai 兼容模式
+```
+
+### 自动回退机制
+
+系统会优先使用配置的方式，如果失败会自动尝试另一种方式：
+- 默认优先使用 `dashscope` 库
+- 如果失败，自动回退到 `openai` 兼容模式
+- 反之亦然
+
+### 新的 API 封装函数
+
+如果需要在代码中直接调用，可以使用 `app/services/qwen_client.py` 中的封装函数：
+
+```python
+from app.services.qwen_client import call_qwen_api, get_api_key
+
+api_key = get_api_key()
+messages = [
+    {"role": "user", "content": "你好"}
+]
+
+# 调用 API（自动选择最佳方式）
+response = call_qwen_api(
+    api_key=api_key,
+    model="qwen-plus",
+    messages=messages,
+    temperature=0.7,
+)
+```
+
+---
+

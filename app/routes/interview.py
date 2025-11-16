@@ -45,7 +45,7 @@ def _extract_job_description() -> tuple[Optional[str], list[str]]:
 @bp.post("/api/interview/questions")
 def api_interview_questions():
     """
-    创建新的面试 session，当前版本返回固定题目，后续可替换为模型生成。
+    创建新的面试 session，根据职位描述使用模型生成面试问题。
     """
     warnings: list[str] = []
     job_text: Optional[str] = None
@@ -60,6 +60,12 @@ def api_interview_questions():
         return jsonify({"success": False, "message": f"解析职位描述失败: {exc}"}), 500
 
     session = create_session(job_text)
+    
+    # 添加问题生成的警告信息
+    question_warnings = session.info.get("questionGenerationWarnings", [])
+    if question_warnings:
+        warnings.extend(question_warnings)
+    
     questions_payload = [
         {
             "id": question.id,

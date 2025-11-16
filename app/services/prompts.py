@@ -271,10 +271,16 @@ Please start your verification work according to the above output requirements.
 """
 
 def build_questions_prompt(jd_text: str) -> str:
-    return f"""根据下面岗位JD，生成 8-12 个结构化面试问题（含追问要点），尽量覆盖技能、项目、数据指标、团队协作与风险意识。
+    return f"""根据下面岗位JD，生成 10 个结构化面试问题（含追问要点），尽量覆盖技能、项目、数据指标、团队协作与风险意识。
 输出为 JSON 数组，每个元素包含：
 - question: 问题
 - followups: 2-3 条追问要点（数组，短句）
+
+要求：
+1. 必须生成恰好 10 个问题
+2. 问题应该针对岗位JD的具体要求
+3. 问题应该多样化，涵盖技术能力、项目经验、软技能等方面
+4. 输出格式必须是有效的 JSON 数组
 
 ===【岗位JD】===
 {jd_text}

@@ -7,6 +7,7 @@ __pycache__/
 .env.local
 .env.*.local
 *.secret
+*secret*
 
 # 数据库文件
 *.db
@@ -18,3 +19,10 @@ uploads/**
 !uploads/
 !uploads/**/
 !uploads/**/.gitkeep
+
+# 临时文件和图片
+*.jpg
+*.png
+*.jpeg
+*.gif
+routes/
