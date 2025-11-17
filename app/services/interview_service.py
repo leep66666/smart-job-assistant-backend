@@ -81,45 +81,56 @@ def _default_questions() -> List[InterviewQuestion]:
 def _generate_questions_from_jd(job_description_text: Optional[str]) -> Tuple[List[InterviewQuestion], List[str]]:
     """
     根据职位描述生成面试问题
-    
+
     Args:
         job_description_text: 职位描述文本
-        
+
     Returns:
         (问题列表, 警告列表)
     """
     warnings: List[str] = []
-    
+
     if not job_description_text or not job_description_text.strip():
         warnings.append("未提供职位描述，将使用默认固定问题。")
         return _default_questions(), warnings
-    
-    # 获取 API Key
+
+    # 获取 API Key（沿用你现在的优先级）
     api_key = (
         os.getenv("DASHSCOPE_API_KEY")
         or os.getenv("INTERVIEW_EVAL_API_KEY")
         or os.getenv("QWEN_API_KEY")
     )
-    
+
     if not api_key:
         warnings.append("未配置问题生成模型API密钥，将使用默认固定问题。")
         return _default_questions(), warnings
-    
+
     # 记录使用的 API Key（用于调试）
     api_key_display = f"{api_key[:20]}...{api_key[-10:]}" if len(api_key) > 30 else api_key
     logger.info(f"使用 API Key: {api_key_display}")
-    
+
     try:
-        # 构建提示词
+        # 构建提示词（沿用原来的逻辑，不动）
         prompt = build_questions_prompt(job_description_text)
-        
-        # 调用模型生成问题，默认使用 qwen3-max
-        model_name = os.getenv("INTERVIEW_EVAL_MODEL", "qwen3-max")
-        logger.info(f"开始生成面试问题，使用模型: {model_name}")
-        
-        # 优先使用 dashscope 库（更稳定）
-        use_dashscope = os.getenv("USE_DASHSCOPE_LIB", "true").lower() in ("true", "1", "yes")
-        
+
+        # ====== 这里开始换成你自己的模型 ======
+        # 使用你自己的 finetune 模型 code，可以用环境变量配置
+        model_name = os.getenv("INTERVIEW_QUESTION_MODEL", "qwen2.5-7b-instruct-ft-202511162245-826c")  # TODO: 换成你的模型 code
+        base_url = os.getenv(
+            "INTERVIEW_QUESTION_BASE_URL",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        )
+
+        logger.info(f"开始生成面试问题，使用自定义模型: {model_name}, base_url={base_url}")
+
+        # 和你示例一样的 openai 兼容调用方式
+        from openai import OpenAI  # type: ignore
+
+        client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+        )
+
         messages = [
             {
                 "role": "system",
@@ -127,75 +138,60 @@ def _generate_questions_from_jd(job_description_text: Optional[str]) -> Tuple[Li
             },
             {"role": "user", "content": prompt},
         ]
-        
+
         try:
-            if use_dashscope:
-                # 使用 dashscope 库直接调用
-                from dashscope import Generation
-                import dashscope
-                
-                dashscope.base_http_api_url = 'https://dashscope.aliyuncs.com/api/v1'
-                
-                logger.info(f"使用 dashscope 库调用 API，模型: {model_name}")
-                response_obj = Generation.call(
-                    api_key=api_key,
-                    model=model_name,
-                    messages=messages,
-                    result_format="message",
-                    temperature=0.7,
-                )
-                
-                if response_obj.status_code != 200:
-                    error_msg = f"HTTP返回码：{response_obj.status_code}，错误码：{response_obj.code}，错误信息：{response_obj.message}"
-                    raise RuntimeError(error_msg)
-                
-                content = response_obj.output.choices[0].message.content or ""
-            else:
-                # 使用 openai 兼容模式
-                try:
-                    client = _get_eval_client()
-                except RuntimeError as exc:
-                    warnings.append(f"无法创建问题生成客户端：{exc}，将使用默认固定问题。")
-                    return _default_questions(), warnings
-                
-                if not client:
-                    warnings.append("未配置问题生成模型API密钥，将使用默认固定问题。")
-                    return _default_questions(), warnings
-                
-                logger.info(f"使用 openai 兼容模式调用 API，模型: {model_name}")
-                completion = client.chat.completions.create(
-                    model=model_name,
-                    messages=messages,
-                    temperature=0.7,  # 使用稍高的温度以获得更多样化的问题
-                )
-                content = completion.choices[0].message.content or ""
+            completion = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=0.7,  # 保留原来的温度设置
+            )
+            content = completion.choices[0].message.content or ""
         except Exception as api_error:
-            from openai import BadRequestError, AuthenticationError, RateLimitError, APIError
+            # ====== 下面这块保留你原来的错误分类逻辑 ======
+            from openai import BadRequestError, AuthenticationError, RateLimitError, APIError  # type: ignore
             error_str = str(api_error)
-            
+
             # 记录使用的 API Key（不完整显示）
-            api_key_display = f"{api_key[:20]}...{api_key[-10:]}" if api_key and len(api_key) > 30 else api_key
+            api_key_display = (
+                f"{api_key[:20]}...{api_key[-10:]}"
+                if api_key and len(api_key) > 30
+                else api_key
+            )
             logger.error(f"API调用失败，使用的 API Key: {api_key_display}")
-            
+
             # 账户欠费
-            if "Arrearage" in error_str or "overdue-payment" in error_str or "account is in good standing" in error_str:
-                friendly_error = f"API调用失败：账户欠费或账户状态异常。请检查阿里云百炼账户余额和状态，以及使用的 API Key 是否正确。详情：https://help.aliyun.com/zh/model-studio/error-code#overdue-payment\n使用的 API Key: {api_key_display}"
+            if (
+                "Arrearage" in error_str
+                or "overdue-payment" in error_str
+                or "account is in good standing" in error_str
+            ):
+                friendly_error = (
+                    "API调用失败：账户欠费或账户状态异常。请检查阿里云百炼账户余额和状态，"
+                    "以及使用的 API Key 是否正确。详情：https://help.aliyun.com/zh/model-studio/error-code#overdue-payment\n"
+                    f"使用的 API Key: {api_key_display}"
+                )
             # 认证错误
-            elif isinstance(api_error, AuthenticationError) or "Invalid" in error_str and "API key" in error_str:
-                friendly_error = f"API调用失败：API Key无效或已过期。请检查 DASHSCOPE_API_KEY 环境变量是否正确。\n使用的 API Key: {api_key_display}"
+            elif isinstance(api_error, AuthenticationError) or (
+                "Invalid" in error_str and "API key" in error_str
+            ):
+                friendly_error = (
+                    "API调用失败：API Key无效或已过期。请检查 DASHSCOPE_API_KEY 环境变量是否正确。\n"
+                    f"使用的 API Key: {api_key_display}"
+                )
             # 限流错误
             elif isinstance(api_error, RateLimitError) or "rate limit" in error_str.lower():
                 friendly_error = "API调用失败：请求频率过高，请稍后再试。"
             # 其他错误
             else:
                 friendly_error = f"API调用失败：{error_str}\n使用的 API Key: {api_key_display}"
-            
+
             logger.error(f"生成面试问题时API调用失败: {friendly_error}")
             logger.error(f"原始错误: {api_error}", exc_info=True)
             raise ValueError(friendly_error) from api_error
-        logger.info(f"模型返回内容长度: {len(content)} 字符")
-        
-        # 清理可能包含的代码块标记
+
+        logger.info(f"自定义模型返回内容长度: {len(content)} 字符")
+
+        # ====== 从这里往下全部沿用你原来解析 JSON 的逻辑 ======
         content = content.strip()
         if content.startswith("```json"):
             content = content[7:]
@@ -204,14 +200,12 @@ def _generate_questions_from_jd(job_description_text: Optional[str]) -> Tuple[Li
         if content.endswith("```"):
             content = content[:-3]
         content = content.strip()
-        
+
         # 解析 JSON
         try:
             questions_data = json.loads(content)
         except json.JSONDecodeError as e:
-            # 尝试提取 JSON 部分
             logger.warning(f"JSON 解析失败，尝试提取 JSON 部分: {e}")
-            # 查找第一个 [ 和最后一个 ]
             start_idx = content.find("[")
             end_idx = content.rfind("]")
             if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
@@ -221,31 +215,30 @@ def _generate_questions_from_jd(job_description_text: Optional[str]) -> Tuple[Li
                     raise ValueError(f"无法解析模型返回的 JSON: {e}")
             else:
                 raise ValueError(f"无法找到有效的 JSON 数组: {e}")
-        
+
         if not isinstance(questions_data, list):
             raise ValueError("模型返回的不是数组格式")
-        
+
         if len(questions_data) == 0:
             raise ValueError("模型返回的问题列表为空")
-        
+
         # 转换为 InterviewQuestion 对象
         questions: List[InterviewQuestion] = []
         for i, item in enumerate(questions_data):
             if not isinstance(item, dict):
                 logger.warning(f"问题项 {i} 不是字典格式，跳过")
                 continue
-            
+
             question_text = item.get("question", "")
             if not question_text or not isinstance(question_text, str):
                 logger.warning(f"问题项 {i} 没有有效的 question 字段，跳过")
                 continue
-            
-            # 如果有追问要点，可以附加到问题后面（可选）
+
             followups = item.get("followups", [])
             if isinstance(followups, list) and followups:
-                # 将追问要点作为提示附加（可选实现）
-                pass  # 当前只使用问题文本
-            
+                # 目前不处理追问，只用问题文本
+                pass
+
             questions.append(
                 InterviewQuestion(
                     id=f"q{i+1}",
@@ -253,21 +246,19 @@ def _generate_questions_from_jd(job_description_text: Optional[str]) -> Tuple[Li
                     duration_seconds=DEFAULT_QUESTION_DURATION,
                 )
             )
-        
+
         if len(questions) == 0:
             raise ValueError("未能从模型返回中提取有效问题")
-        
-        # 如果生成的问题少于10个，记录警告
+
         if len(questions) < 10:
             warnings.append(f"模型生成了 {len(questions)} 个问题，少于要求的 10 个。")
         elif len(questions) > 10:
-            # 如果多于10个，只取前10个
             questions = questions[:10]
             warnings.append("模型生成了超过 10 个问题，已截取前 10 个。")
-        
+
         logger.info(f"成功生成 {len(questions)} 个面试问题")
         return questions, warnings
-        
+
     except Exception as exc:
         logger.exception("生成面试问题失败")
         warnings.append(f"生成面试问题失败：{exc}，将使用默认固定问题。")

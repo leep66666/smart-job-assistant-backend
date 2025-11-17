@@ -9,8 +9,6 @@ import subprocess
 import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, Tuple
-from app.extensions import db
-from app.models import ResumeUser, ResumeGeneration
 
 from flask import Blueprint, request, jsonify, url_for
 from openai import OpenAI
@@ -26,14 +24,14 @@ bp = Blueprint("resume", __name__)
 logger = logging.getLogger(__name__)
 
 # 初始化qwen
-# 优先使用 DASHSCOPE_API_KEY（百炼API Key）
-QWEN_API_KEY = os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY", "")
+# 从环境变量读取 API key（必须设置，不允许硬编码）
+QWEN_API_KEY = os.getenv("QWEN_API_KEY", "")
 QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
 if not QWEN_API_KEY:
-    logger.error("DASHSCOPE_API_KEY 或 QWEN_API_KEY 未设置，简历生成功能将无法正常工作。请设置环境变量 DASHSCOPE_API_KEY 或 QWEN_API_KEY")
+    logger.error("QWEN_API_KEY 未设置，简历生成功能将无法正常工作。请设置环境变量 QWEN_API_KEY")
 else:
-    logger.info(f"Qwen API Key 已配置（长度: {len(QWEN_API_KEY)}，来源: {'DASHSCOPE_API_KEY' if os.getenv('DASHSCOPE_API_KEY') else 'QWEN_API_KEY'}）")
+    logger.info(f"QWEN_API_KEY 已配置（长度: {len(QWEN_API_KEY)}）")
 
 client = OpenAI(
     api_key=QWEN_API_KEY,
@@ -88,6 +86,10 @@ def strip_code_fences(text: str) -> str:
 
 
 def manual_resume_to_text(payload: Dict[str, Any]) -> str:
+    """
+    把前端传来的 manualResume JSON（ManualResumeFormData）转成一段纯文本，
+    作为“原始简历内容”喂给大模型。
+    """
     if not isinstance(payload, dict):
         return ""
 
@@ -177,18 +179,14 @@ def markdown_to_latex(md: str) -> str:
 
     def process_inline_formatting(text: str) -> str:
         """处理行内格式：粗体、斜体、代码、链接，并修复符号前后空白"""
-        # 使用占位符方法：先用唯一占位符替换格式标记，转义文本，然后替换回格式标记
-        # 使用不包含LaTeX特殊字符的占位符格式，避免被转义
         placeholders = {}
         placeholder_counter = [0]
 
         def get_placeholder():
             placeholder_counter[0] += 1
-            # 使用不包含下划线和其他LaTeX特殊字符的占位符
-            # 使用大写的PLACEHOLDER前缀和数字，避免与LaTeX特殊字符冲突
             return f"PLACEHOLDER{placeholder_counter[0]}PLACEHOLDER"
 
-        # 先处理代码（避免与其他格式冲突）
+        # inline code
         def repl_inline_code(m):
             placeholder = get_placeholder()
             inner = m.group(1)
@@ -198,23 +196,24 @@ def markdown_to_latex(md: str) -> str:
 
         text = re.sub(r'`([^`]+)`', repl_inline_code, text)
 
-        # 处理链接 [text](url)
+        # links
         def repl_link(m):
             placeholder = get_placeholder()
             link_text = m.group(1)
             link_url = m.group(2)
-            # URL 中的特殊字符需要转义
-            link_url_escaped = link_url.replace('\\', r'\textbackslash{}').replace('{', r'\{').replace('}',
-                                                                                                       r'\}').replace(
-                '#', r'\#').replace('$', r'\$').replace('%', r'\%').replace('&', r'\&').replace('_', r'\_').replace('^',
-                                                                                                                    r'\^{}').replace(
-                '~', r'\~{}')
+            link_url_escaped = (
+                link_url.replace('\\', r'\textbackslash{}')
+                .replace('{', r'\{').replace('}', r'\}')
+                .replace('#', r'\#').replace('$', r'\$').replace('%', r'\%')
+                .replace('&', r'\&').replace('_', r'\_').replace('^', r'\^{}')
+                .replace('~', r'\~{}')
+            )
             placeholders[placeholder] = r'\href{' + link_url_escaped + '}{' + escape_latex(link_text) + '}'
             return placeholder
 
-        text = re.sub(r'\[([^\]]+)\]\(([^\)]+)\)', repl_link, text)
+        text = re.sub(r'$begin:math:display$\(\[\^$end:math:display$]+\]$begin:math:text$\(\[\^$end:math:text$]+\)', repl_link, text)
 
-        # 处理粗体 **text** 或 __text__
+        # bold
         def repl_bold(m):
             placeholder = get_placeholder()
             placeholders[placeholder] = r'\textbf{' + escape_latex(m.group(1)) + '}'
@@ -223,7 +222,7 @@ def markdown_to_latex(md: str) -> str:
         text = re.sub(r'\*\*([^\*]+)\*\*', repl_bold, text)
         text = re.sub(r'__([^_]+)__', repl_bold, text)
 
-        # 处理斜体 *text* 或 _text_（不在粗体或代码中）
+        # italic
         def repl_italic(m):
             placeholder = get_placeholder()
             placeholders[placeholder] = r'\textit{' + escape_latex(m.group(1)) + '}'
@@ -232,20 +231,15 @@ def markdown_to_latex(md: str) -> str:
         text = re.sub(r'(?<!\*)\*([^\*]+)\*(?!\*)', repl_italic, text)
         text = re.sub(r'(?<!_)_([^_]+)_(?!_)', repl_italic, text)
 
-        # 修复符号前后的空白：在符号前后添加LaTeX的不可断空格
-        # 使用 ~ 来防止换行，但只在非列表项的情况下处理
-        # 注意：这里假设列表项已经在之前被处理了，所以这里的文本是普通段落
-        # 只处理被空格包围的符号，避免影响列表项
-        text = re.sub(r'([^\s~\-])\s+\+\s+([^\s~\-])', r'\1~+~\2', text)  # + 前后使用 ~ 防止换行
-        text = re.sub(r'([^\s~\-])\s+-\s+([^\s~\-])', r'\1~-~\2', text)  # - 前后（但不在行首，且不是列表项）
-        text = re.sub(r'([^\s~])\s+=\s+([^\s~])', r'\1~=~\2', text)  # = 前后
-        text = re.sub(r'([^\s~])\s+<\s+([^\s~])', r'\1~<~\2', text)  # < 前后
-        text = re.sub(r'([^\s~])\s+>\s+([^\s~])', r'\1~>~\2', text)  # > 前后
+        # 修复符号前后的空白
+        text = re.sub(r'([^\s~\-])\s+\+\s+([^\s~\-])', r'\1~+~\2', text)
+        text = re.sub(r'([^\s~\-])\s+-\s+([^\s~\-])', r'\1~-~\2', text)
+        text = re.sub(r'([^\s~])\s+=\s+([^\s~])', r'\1~=~\2', text)
+        text = re.sub(r'([^\s~])\s+<\s+([^\s~])', r'\1~<~\2', text)
+        text = re.sub(r'([^\s~])\s+>\s+([^\s~])', r'\1~>~\2', text)
 
-        # 转义整个文本（占位符不包含LaTeX特殊字符，不会被转义）
         text = escape_latex(text)
 
-        # 替换回格式标记
         for placeholder, replacement in placeholders.items():
             text = text.replace(placeholder, replacement)
 
@@ -268,7 +262,7 @@ def markdown_to_latex(md: str) -> str:
             continue
 
         if in_verbatim:
-            out.append(line)  # verbatim 内不转义
+            out.append(line)
             i += 1
             continue
 
@@ -288,16 +282,14 @@ def markdown_to_latex(md: str) -> str:
         if line.startswith('# '):
             flush_itemize()
             title_text = process_inline_formatting(line[2:].strip())
-            # 第一行是姓名，使用大标题居中格式
             if is_first_line:
                 out.append(r'\begin{tabularx}{\linewidth}{@{} C @{}}')
                 out.append(r'\Huge{' + title_text + r'} \\[7.5pt]')
                 is_first_line = False
                 i += 1
-                # 检查下一行是否是联系方式
+                # 下一行如果是联系方式
                 if i < len(lines) and lines[i].strip() and not lines[i].startswith('#'):
                     contact_line = lines[i].strip()
-                    # 处理联系方式（可能包含 | 分隔符）
                     contact_parts = [p.strip() for p in contact_line.split('|')]
                     contact_latex = []
                     for part in contact_parts:
@@ -309,7 +301,6 @@ def markdown_to_latex(md: str) -> str:
                 out.append(r'\end{tabularx}')
                 continue
             else:
-                # 其他一级标题作为section
                 out.append(r'\section{' + title_text + '}')
                 i += 1
                 continue
@@ -318,10 +309,7 @@ def markdown_to_latex(md: str) -> str:
         list_match = re.match(r'^\s*([-*•])\s+', line)
         if list_match:
             if not in_itemize:
-                # 使用 enumitem 改进列表格式，防止溢出
-                # 检查前一行是否是工作经历（以\end{tabularx}结尾）
                 if out and out[-1].strip().endswith(r'\end{tabularx}'):
-                    # 在工作经历后，使用minipage包装列表
                     out.append(r'\begin{minipage}[t]{\linewidth}')
                     in_minipage = True
                 out.append(r'\begin{itemize}[nosep,after=\strut, leftmargin=1em, itemsep=3pt,label=--]')
@@ -340,13 +328,12 @@ def markdown_to_latex(md: str) -> str:
             i += 1
             continue
 
-        # 检查是否是工作经历或项目经历格式：**职位名称** (时间)
-        job_match = re.match(r'^\s*\*\*([^\*]+)\*\*\s*\(([^\)]+)\)', line)
+        # 工作经历/项目标题
+        job_match = re.match(r'^\s*\*\*([^\*]+)\*\*\s*$begin:math:text$\(\[\^$end:math:text$]+\)', line)
         if job_match:
             flush_itemize()
             job_title = job_match.group(1).strip()
             job_time = job_match.group(2).strip()
-            # 使用tabularx格式：职位名称左对齐，时间右对齐
             out.append(r'\begin{tabularx}{\linewidth}{@{}l X r@{}}')
             out.append(
                 r'\textbf{' + escape_latex(job_title) + r'} & \hfill & ' + escape_latex(job_time) + r' \\[3.75pt]')
@@ -354,15 +341,12 @@ def markdown_to_latex(md: str) -> str:
             i += 1
             continue
 
-        # 普通段落 - 处理格式并防止溢出
+        # 普通段落
         processed_line = process_inline_formatting(line)
-        # 对于长段落，使用合适的换行设置
-        # 不添加额外的minipage，让LaTeX自然处理换行
         out.append(processed_line)
         i += 1
 
     flush_itemize(check_next=False)
-    # 确保关闭所有打开的minipage
     if in_minipage:
         out.append(r'\end{minipage}')
     return '\n'.join(out)
@@ -372,7 +356,6 @@ def wrap_into_template(body: str, chinese: bool = True) -> str:
     """
     使用改进的 LaTeX 模板，参考专业简历格式，防止内容溢出
     """
-    # 基础包和设置
     preamble = r"""
 \documentclass[a4paper,12pt]{article}
 \usepackage{url}
@@ -389,7 +372,6 @@ def wrap_into_template(body: str, chinese: bool = True) -> str:
 \usepackage{multirow}
 """
 
-    # 中文字体支持
     if chinese:
         preamble += r"""
 \usepackage{fontspec}
@@ -403,11 +385,9 @@ def wrap_into_template(body: str, chinese: bool = True) -> str:
 \usepackage{lmodern}
 """
 
-    # 继续添加必要的包
     preamble += r"""
 % 自定义章节格式
 """
-    # 根据语言设置章节格式
     if chinese:
         preamble += r"""
 \titleformat{\section}{\Large\bfseries\raggedright}{}{0em}{}[\titlerule]
@@ -419,7 +399,6 @@ def wrap_into_template(body: str, chinese: bool = True) -> str:
 \titlespacing{\section}{0pt}{10pt}{10pt}
 """
 
-    # 继续添加必要的包
     preamble += r"""
 % 超链接设置
 \usepackage[unicode, draft=false]{hyperref}
@@ -431,7 +410,7 @@ def wrap_into_template(body: str, chinese: bool = True) -> str:
 \newlength{\fullcollw}
 \setlength{\fullcollw}{0.47\textwidth}
 
-% 工作经历环境定义（参考样例模板）
+% 工作经历环境定义
 \newenvironment{jobshort}[2]
     {
     \begin{tabularx}{\linewidth}{@{}l X r@{}}
@@ -457,29 +436,23 @@ def wrap_into_template(body: str, chinese: bool = True) -> str:
 % 页面设置
 \pagestyle{empty}
 \setlength{\parskip}{6pt}
-\setlength{\parindent}{0pt}  % 无段落缩进
+\setlength{\parindent}{0pt}
 \raggedright
-\sloppy  % 允许更宽松的换行，防止溢出
-\emergencystretch=3em  % 额外的紧急拉伸，防止溢出
-\tolerance=1000  % 增加容忍度，允许更宽松的换行
-\hbadness=10000  % 减少关于不良换行的警告
+\sloppy
+\emergencystretch=3em
+\tolerance=1000
+\hbadness=10000
 
-% 改进段落换行，减少不必要的空白
 \setlength{\lineskip}{0pt}
 \setlength{\baselineskip}{1.1\baselineskip}
 
-% 防止单词在符号前后断开
-\binoppenalty=10000  % 防止二元运算符前后换行
-\relpenalty=10000    % 防止关系运算符前后换行
+\binoppenalty=10000
+\relpenalty=10000
 
 \begin{document}
 """
 
-    # 内容包装
-    # 对于中文，由于已经设置了默认字体，不需要额外的字体包装
-    # 但如果需要确保所有内容都使用中文字体，可以保留cnfont包装
     if chinese:
-        # 使用cnfont确保所有内容（包括标题）都使用中文字体
         content = r"{\cnfont" + "\n" + body + "\n}"
     else:
         content = body
@@ -488,8 +461,6 @@ def wrap_into_template(body: str, chinese: bool = True) -> str:
 \end{document}
 """
 
-
-# LaTeX 编译
 
 def compile_latex_to_pdf(tex_content: str, file_id: str, timeout_sec: int = 300) -> Tuple[str, str, str]:
     """
@@ -527,18 +498,21 @@ def compile_latex_to_pdf(tex_content: str, file_id: str, timeout_sec: int = 300)
             cmd = [pdflatex_bin, "-interaction=nonstopmode", tex_path.name]
             try:
                 logger.info(f"Running pdflatex: {' '.join(cmd)} (1/2)")
-                p1 = subprocess.run(cmd, cwd=tmpdir_path, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                                    timeout=timeout_sec)
+                p1 = subprocess.run(
+                    cmd, cwd=tmpdir_path, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, text=True, timeout=timeout_sec
+                )
                 logger.info(f"Running pdflatex: {' '.join(cmd)} (2/2)")
-                p2 = subprocess.run(cmd, cwd=tmpdir_path, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                                    timeout=timeout_sec)
+                p2 = subprocess.run(
+                    cmd, cwd=tmpdir_path, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, text=True, timeout=timeout_sec
+                )
             except subprocess.TimeoutExpired:
                 raise RuntimeError(f"LaTeX 编译超过 {timeout_sec}s 超时。")
             if p2.returncode != 0 or not pdf_path_tmp.exists():
                 log = (p1.stdout or "") + "\n" + (p2.stdout or "")
                 raise RuntimeError(f"pdflatex 编译失败：\n{log}")
 
-        # 移动到可下载目录
         final_tex = upload_dir / f"{file_id}.tex"
         final_pdf = upload_dir / f"{file_id}.pdf"
         shutil.move(str(tex_path), str(final_tex))
@@ -551,36 +525,32 @@ def gen_file_id(prefix: str = "resume") -> str:
     return f"{prefix}-{uuid.uuid4().hex[:12]}"
 
 
-# 主要 API：生成简历（Qwen Markdown -> LaTeX -> PDF，原始文件只走临时目录）
-# 主要 API：生成简历（Qwen Markdown -> LaTeX -> PDF，DB-first + 不持久化原始文件）
-# 主要 API：生成简历（Qwen Markdown -> LaTeX -> PDF，DB-first + 不持久化原始文件）
+# 主要 API：生成简历（支持：上传简历文件 或 手动简历 JSON + JD 文件）
 @bp.post("/api/resume/generate")
 def api_resume_generate():
     """
-    输入：上传的 resume / jobDescription 文件 + 可选的 manualResume JSON
+    输入：
+      - 必须：jobDescription 文件 (field: jobDescription)
+      - 二选一：
+        a) 上传简历文件 (field: resume)
+        b) 前端表单传 manualResume JSON (field: manualResume)
+
     流程：
-      1. 上传文件只写临时目录，用于解析文本，请求结束即删除，不落长期磁盘
-      2. 解析并截断 resume_text / jd_text
+      1. 保存原始文件到磁盘（若有简历文件）
+      2. 读取并截断 resume_text / jd_text
       3. 检测语言、构造 prompt
-      4. 写入数据库：resume_users / resume_generations
-         - snapshot_profile 用来保存前端手动填写的 ManualResumeFormData JSON
-      5. 调用 Qwen 生成 Markdown 简历
-      6. Markdown -> LaTeX -> PDF，长期只保存 md/pdf
-      7. 用生成结果回填 generation 记录
-      8. 返回结构与老版本保持一致（尤其是 generatedResume / downloadPdf / resumeSaved / jdSaved / warnings）
+      4. 调用 Qwen 生成 Markdown 简历
+      5. Markdown -> LaTeX -> PDF，保存 .md / .pdf 到磁盘
+      6. 返回 generatedResume / downloadMd / downloadPdf / resumeSaved / jdSaved / warnings
     """
     ensure_dirs()
 
-    # 0) 拿文件
     resume = request.files.get("resume")
     jd = request.files.get("jobDescription")
 
-    # 可选：前端传来的手动简历 JSON，字段名 manualResume
-    # 前端对应：formData.append('manualResume', JSON.stringify(manualResume));
+    # 可选：manualResume JSON
     manual_resume_raw = request.form.get("manualResume")
     manual_resume = None
-
-    # 兼容老的 warning 结构
     warnings = []
 
     if manual_resume_raw:
@@ -589,137 +559,95 @@ def api_resume_generate():
         except json.JSONDecodeError:
             logger.warning("manualResume 字段 JSON 解析失败，将忽略该字段")
             warnings.append("manualResume JSON parse error, ignored.")
+            manual_resume = None
 
     manual_resume_text = manual_resume_to_text(manual_resume) if manual_resume else ""
     has_manual_resume_text = bool(manual_resume_text.strip())
 
+    # JD 必须有
     if not jd:
         return jsonify({"success": False, "message": "Job description file is required."}), 400
 
+    # 校验扩展名
     if resume and not ext_ok(resume.filename):
         return jsonify({"success": False, "message": "Unsupported resume file type"}), 400
     if not ext_ok(jd.filename):
         return jsonify({"success": False, "message": "Unsupported job description file type"}), 400
 
+    # 必须提供：简历文件 或 manualResume
     if not resume and not has_manual_resume_text:
         return jsonify({"success": False, "message": "Provide either a resume file or manual resume data."}), 400
 
-    # 用前端传的 userIdentifier 当 email
-    user_email = request.form.get("userIdentifier")
+    # 1) 保存原始文件（只有 resume / jd；manualResume 只是 JSON，不落盘）
+    if resume:
+        resume_path = save_file(resume, Config.RESUME_DIR)
+    else:
+        resume_path = None
+    jd_path = save_file(jd, Config.JD_DIR)
 
-    # 为了兼容此前的返回结构，这里先定义占位变量
-    # 当前实现不再长期保存原始上传文件，所以这俩会一直是 None
-    resume_path = None
-    jd_path = None
+    # 2) 读取文本
+    if resume_path:
+        resume_text, w1 = read_text_from_file(resume_path)
+    else:
+        # 只用手动简历
+        resume_text = manual_resume_text
+        if not resume_text:
+            return jsonify({"success": False, "message": "Manual resume data is empty."}), 400
+        w1 = None
+
+    jd_text, w2 = read_text_from_file(jd_path)
+    warnings.extend([w for w in (w1, w2) if w])
+
+    # 3) 截断
+    resume_text, w3 = truncate_text(resume_text, Config.MAX_INPUT_CHARS)
+    jd_text, w4 = truncate_text(jd_text, Config.MAX_INPUT_CHARS)
+    warnings.extend([w for w in (w3, w4) if w])
+
+    # 4) 检测语言
+    resume_lang = detect_language(resume_text)
+    jd_lang = detect_language(jd_text)
+    target_lang = jd_lang if jd_lang == resume_lang else (jd_lang if jd_lang == 'zh' else resume_lang)
+    logger.info(f"检测到简历语言: {resume_lang}, JD语言: {jd_lang}, 使用目标语言: {target_lang}")
+
+    # 5) 组装 Prompt
+    base_prompt = build_resume_prompt(resume_text, jd_text, language=target_lang)
+
+    # 文件前缀
+    file_id = gen_file_id()
+
+    # 6) 系统提示词
+    if target_lang == 'zh':
+        system_prompt = (
+            "你是一位资深的简历优化专家和AI招聘助手。\n"
+            "请严格按照用户提供的详细要求生成简历。\n"
+            "关键要求：\n"
+            "1. 输出纯Markdown格式，不要包含代码块标记（不要用 ``` 包裹）\n"
+            "2. 第一行必须是候选人真实姓名，格式为：# 姓名\n"
+            "3. 第二行是联系方式，用 | 分隔\n"
+            "4. 使用 ## 作为章节标题\n"
+            "5. 所有客观信息必须严格遵照个人信息库，不能篡改或夸大\n"
+            "6. 使用STAR法则和量化指标描述经历\n"
+            "7. 所有内容必须使用中文"
+        )
+    else:
+        system_prompt = (
+            "You are a senior resume optimization expert and AI recruitment assistant.\n"
+            "Please strictly follow the detailed requirements provided by the user to generate the resume.\n"
+            "Key Requirements:\n"
+            "1. Output pure Markdown format, do NOT include code block markers (do NOT wrap in ```)\n"
+            "2. The first line must be the candidate's real name, formatted as: # Name\n"
+            "3. The second line is contact information, separated by |\n"
+            "4. Use ## for section headings\n"
+            "5. All objective information must strictly follow the personal information database, no modification or exaggeration allowed\n"
+            "6. Use STAR method and quantitative metrics to describe experiences\n"
+            "7. All content must be in English"
+        )
 
     try:
-        # === 1) 原始文件只写临时目录，用完即删 ===
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir_path = Path(tmpdir)
-
-            jd_tmp = tmpdir_path / (jd.filename or "jobDescription")
-            jd.save(str(jd_tmp))
-
-            if resume:
-                resume_tmp = tmpdir_path / (resume.filename or "resume")
-                resume.save(str(resume_tmp))
-                resume_text, w1 = read_text_from_file(str(resume_tmp))
-                warnings.extend([w1] if w1 else [])
-            else:
-                resume_text = manual_resume_text
-                if not resume_text:
-                    return jsonify({"success": False, "message": "Manual resume data is empty."}), 400
-                w1 = None
-
-            jd_text, w2 = read_text_from_file(str(jd_tmp))
-            warnings.extend([w for w in (w1, w2) if w])
-
-        # === 2) 截断 ===
-        resume_text, w3 = truncate_text(resume_text, Config.MAX_INPUT_CHARS)
-        jd_text, w4 = truncate_text(jd_text, Config.MAX_INPUT_CHARS)
-        warnings.extend([w for w in (w3, w4) if w])
-
-        # === 3) 语言检测 ===
-        resume_lang = detect_language(resume_text)
-        jd_lang = detect_language(jd_text)
-        target_lang = jd_lang if jd_lang == resume_lang else (jd_lang if jd_lang == "zh" else resume_lang)
-        logger.info(f"检测到简历语言: {resume_lang}, JD语言: {jd_lang}, 使用目标语言: {target_lang}")
-
-        # === 4) 组装 Prompt ===
-        base_prompt = build_resume_prompt(resume_text, jd_text, language=target_lang)
-
-        # 统一 fileId
-        file_id = gen_file_id()
-
-        # === 5) 系统提示词 ===
-        if target_lang == 'zh':
-            system_prompt = (
-                "你是一位资深的简历优化专家和AI招聘助手。\n"
-                "请严格按照用户提供的详细要求生成简历。\n"
-                "关键要求：\n"
-                "1. 输出纯Markdown格式，不要包含代码块标记（不要用 ``` 包裹）\n"
-                "2. 第一行必须是候选人真实姓名，格式为：# 姓名\n"
-                "3. 第二行是联系方式，用 | 分隔\n"
-                "4. 使用 ## 作为章节标题\n"
-                "5. 所有客观信息必须严格遵照个人信息库，不能篡改或夸大\n"
-                "6. 使用STAR法则和量化指标描述经历\n"
-                "7. 所有内容必须使用中文"
-            )
-        else:
-            system_prompt = (
-                "You are a senior resume optimization expert and AI recruitment assistant.\n"
-                "Please strictly follow the detailed requirements provided by the user to generate the resume.\n"
-                "Key Requirements:\n"
-                "1. Output pure Markdown format, do NOT include code block markers (do NOT wrap in ```)\n"
-                "2. The first line must be the candidate's real name, formatted as: # Name\n"
-                "3. The second line is contact information, separated by |\n"
-                "4. Use ## for section headings\n"
-                "5. All objective information must strictly follow the personal information database, no modification or exaggeration allowed\n"
-                "6. Use STAR method and quantitative metrics to describe experiences\n"
-                "7. All content must be in English"
-            )
-
-        # === 6) 写入数据库：ResumeUser + 初始 ResumeGeneration（还没生成简历） ===
-        user = None
-        if user_email:
-            user = ResumeUser.query.filter_by(email=user_email).first()
-
-        # 如果没找到用户，尽量用手动简历里的姓名 / 邮箱
-        manual_personal = (manual_resume or {}).get("personal", {}) if manual_resume else {}
-
-        if not user:
-            user = ResumeUser(
-                full_name=(manual_personal.get("fullName") or "Unknown"),
-                email=(user_email or manual_personal.get("email")),
-                resume_raw=resume_text,
-            )
-            db.session.add(user)
-            db.session.flush()  # 拿到 user.id
-
-        # snapshot_profile 用来保存前端传来的 ManualResumeFormData（如果有）
-        snapshot_profile_json = json.dumps(manual_resume, ensure_ascii=False) if manual_resume else None
-
-        generation = ResumeGeneration(
-            user_id=user.id,
-            file_id=file_id,
-            resume_text=resume_text,
-            jd_text=jd_text,
-            generated_md="",
-            target_lang=target_lang,
-            md_filename=None,
-            pdf_filename=None,
-            resume_file_path=None,
-            jd_file_path=None,
-            prompt_used=base_prompt,
-            snapshot_profile=snapshot_profile_json,
-        )
-        db.session.add(generation)
-        db.session.flush()  # 拿到 generation.id
-
-        # === 7) 调 Qwen 生成 Markdown（生成部分严格照你原来的逻辑） ===
-        logger.info(f"开始调用 Qwen API 生成简历，file_id: {file_id}, generation_id: {generation.id}")
+        # 7) 调用 Qwen 生成 Markdown
+        logger.info(f"开始调用 Qwen API 生成简历，file_id: {file_id}")
         completion = client.chat.completions.create(
-            model=os.getenv("QWEN_MODEL", "qwen3-max"),
+            model=os.getenv("QWEN_MODEL", "qwen-plus"),
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": base_prompt},
@@ -732,12 +660,11 @@ def api_resume_generate():
 
         if not generated_md:
             logger.warning("Qwen API 返回的内容为空")
-            db.session.rollback()
             return jsonify({"success": False, "message": "生成的简历内容为空，请重试"}), 500
 
         logger.info(f"Qwen API 返回内容长度: {len(generated_md)} 字符")
 
-        # === 8) 存 Markdown -> 生成 downloadMd ===
+        # 8) 保存 Markdown
         upload_dir = Path(getattr(Config, "UPLOAD_DIR", getattr(Config, "OUTPUT_DIR", "uploads")))
         upload_dir.mkdir(parents=True, exist_ok=True)
         md_path = upload_dir / f"{file_id}.md"
@@ -745,7 +672,7 @@ def api_resume_generate():
         download_md = url_for("uploads.download_file", file_name=f"{file_id}.md", _external=True)
         logger.info(f"Markdown 文件已保存: {md_path}")
 
-        # === 9) 尝试生成 PDF ===
+        # 9) 尝试生成 PDF
         download_pdf = None
         try:
             logger.info("开始生成 PDF...")
@@ -759,13 +686,7 @@ def api_resume_generate():
             logger.warning(f"PDF 生成失败（不影响主流程）: {latex_err}")
             warnings.append(f"PDF generation skipped: {latex_err}")
 
-        # === 10) 回填 DB ===
-        generation.generated_md = generated_md
-        generation.md_filename = f"{file_id}.md"
-        generation.pdf_filename = f"{file_id}.pdf" if download_pdf else None
-        db.session.commit()
-
-        # === 11) 返回：务必包含 generatedResume，前端才能切换到结果页 ===
+        # 10) 返回
         logger.info(f"简历生成完成，file_id: {file_id}, 返回成功响应")
         return jsonify({
             "success": True,
@@ -773,15 +694,11 @@ def api_resume_generate():
             "fileId": file_id,
             "downloadMd": download_md,
             "downloadPdf": download_pdf,  # 可能为 None
-            "resumeSaved": resume_path,  # 现在就是 None，占位用
-            "jdSaved": jd_path,  # 同上
+            "resumeSaved": resume_path,   # 可能为 None（手动模式）
+            "jdSaved": jd_path,
             "warnings": warnings,
         }), 200
 
     except Exception as e:
-        logger.exception("调用 Qwen API / LaTeX 编译或数据库写入失败")
-        try:
-            db.session.rollback()
-        except Exception:
-            pass
+        logger.exception("调用 Qwen API / LaTeX 编译失败")
         return jsonify({"success": False, "message": f"生成失败: {e}"}), 500
