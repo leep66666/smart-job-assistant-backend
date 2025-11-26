@@ -24,19 +24,23 @@ bp = Blueprint("resume", __name__)
 logger = logging.getLogger(__name__)
 
 # 初始化qwen
-# 从环境变量读取 API key（必须设置，不允许硬编码）
-QWEN_API_KEY = os.getenv("QWEN_API_KEY", "")
+# 优先使用 DASHSCOPE_API_KEY（百炼API Key），从环境变量读取，不允许硬编码
 QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
-if not QWEN_API_KEY:
-    logger.error("QWEN_API_KEY 未设置，简历生成功能将无法正常工作。请设置环境变量 QWEN_API_KEY")
-else:
-    logger.info(f"QWEN_API_KEY 已配置（长度: {len(QWEN_API_KEY)}）")
-
-client = OpenAI(
-    api_key=QWEN_API_KEY,
-    base_url=QWEN_BASE_URL,
-)
+def get_qwen_client():
+    """
+    延迟初始化 OpenAI 客户端，每次调用时重新读取环境变量
+    这样可以确保在 .env.local 加载后也能正确获取 API key
+    """
+    api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY", "")
+    if not api_key:
+        logger.warning("DASHSCOPE_API_KEY 或 QWEN_API_KEY 未设置，简历生成功能将无法正常工作。请设置环境变量 DASHSCOPE_API_KEY 或 QWEN_API_KEY")
+    else:
+        logger.info(f"API Key 已配置（长度: {len(api_key)}）")
+    return OpenAI(
+        api_key=api_key,
+        base_url=QWEN_BASE_URL,
+    )
 
 # Markdown -> LaTeX
 TRIPLE_BACKTICK_RE = re.compile(r"^\s*```(?:[a-zA-Z]+)?\s*([\s\S]*?)\s*```\s*$")
@@ -646,6 +650,7 @@ def api_resume_generate():
     try:
         # 7) 调用 Qwen 生成 Markdown
         logger.info(f"开始调用 Qwen API 生成简历，file_id: {file_id}")
+        client = get_qwen_client()  # 延迟初始化，确保读取到最新的环境变量
         completion = client.chat.completions.create(
             model=os.getenv("QWEN_MODEL", "qwen-plus"),
             messages=[

@@ -26,3 +26,10 @@ uploads/**
 *.jpeg
 *.gif
 routes/
+
+# 大文件（模型权重和训练数据）
+*.zip
+*.jsonl
+# 如果使用 Git LFS，可以取消下面的注释
+# !qwen2_5-7b.zip
+# !Trainingdata_converted.jsonl

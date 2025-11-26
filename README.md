@@ -94,8 +94,31 @@ smart-job-assistant-backend/
 │   ├── config.py        # 全局配置
 │   └── __init__.py      # 应用工厂
 ├── uploads/             # 运行期产生的文件
-└── run.py               # Flask 启动入口
+├── run.py               # Flask 启动入口
+├── qwen2_5-7b.zip       # 训练模型的权重文件（约600MB）
+└── Trainingdata_converted.jsonl  # 训练模型的数据文件
 ```
+
+### 模型文件说明
+
+项目包含以下模型相关文件：
+
+1. **qwen2_5-7b.zip** (约600MB)
+   - 这是训练好的 Qwen2.5-7B 模型的权重文件
+   - 包含模型的所有参数和配置
+   - 用于本地部署和推理
+   - 注意：由于文件较大，建议使用 Git LFS 或从其他存储位置下载
+
+2. **Trainingdata_converted.jsonl** (约1.6MB)
+   - 这是用于训练模型的数据文件
+   - 格式为 JSONL（每行一个 JSON 对象）
+   - 包含训练样本和对应的标签
+   - 用于模型微调和进一步训练
+
+**注意**：这些文件可能较大，如果使用 Git 管理，建议：
+- 使用 Git LFS (Large File Storage) 来管理大文件
+- 或者将这些文件存储在云存储服务中，在 README 中提供下载链接
+- 确保 `.gitignore` 中已正确配置，避免意外提交大文件
 
 ---
 
